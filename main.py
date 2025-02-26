@@ -1,7 +1,14 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 import mysql.connector
 from flask_cors import CORS
+import os  # 导入 os 模块
+import time
+import requests
+
+import http.server
+import socketserver
+import ssl
 
 app = Flask(__name__)
 CORS(app)
@@ -9,8 +16,14 @@ CORS(app)
 # Database Configuration
 app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+mysqlconnector://root:@127.0.0.1:3306/test3'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+UPLOAD_FOLDER = 'images'  # 图片存储文件夹
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 db = SQLAlchemy(app)
+
+CERT_FOLDER = '/tmp/ca/'
+CERT_FILE = 'exmaple.crt'
+KEY_FILE = 'example.key'
 
 # Define the Information model (table)
 class Information(db.Model):
@@ -42,6 +55,7 @@ class News(db.Model):
     newsText = db.Column(db.String(1000), nullable=False)  # Adjust length as needed
     newsImage = db.Column(db.String(255))  # Adjust length as needed
     newsDate = db.Column(db.String(20))  # Adjust length as needed
+    newsDetailText = db.Column(db.String(1000), nullable=False)  # Adjust length as needed
 
     def __repr__(self):
         return '<News %r>' % self.id
@@ -86,11 +100,19 @@ class ProductSort(db.Model):
 with app.app_context():
     db.create_all()
 
+@app.route('/images/<path:filename>')
+def serve_image(filename):
+    """提供 images 文件夹中的图片"""
+    try:
+        return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+    except FileNotFoundError:
+        return jsonify({'error': 'File not found'}), 404
 
 # API Endpoint (POST /information)
 @app.route('/information', methods=['POST'])
 def handle_information():
     action = request.form.get('action')
+    print(action)
     if not action:
         return jsonify({'message': 'Invalid data. "action" is required.'}), 400
 
@@ -235,7 +257,8 @@ def query_news():
             'id': news.id,
             'newsText': news.newsText,
             'newsImage': news.newsImage,
-            'newsDate': news.newsDate
+            'newsDate': news.newsDate,
+            'newsDetailText':news.newsDetailText
         })
     return jsonify(news_list)
 
@@ -248,7 +271,8 @@ def create_news(form_data):
     new_news = News(
         newsText=news_text,
         newsImage=form_data.get('newsImage'),
-        newsDate=form_data.get('newsDate')
+        newsDate=form_data.get('newsDate'),
+        newsDetailText=form_data.get('newsDetailText')
     )
     db.session.add(new_news)
     db.session.commit()
@@ -268,6 +292,7 @@ def modify_news(form_data):
     existing_news.newsText = form_data.get('newsText', existing_news.newsText)
     existing_news.newsImage = form_data.get('newsImage', existing_news.newsImage)
     existing_news.newsDate = form_data.get('newsDate', existing_news.newsDate)
+    existing_news.newsDetailText = form_data.get('newsDetailText', existing_news.newsDetailText)
 
     db.session.commit()
 
@@ -286,7 +311,11 @@ def handle_products():
     elif action == 'new':
         return create_product()
     elif action == 'new_image':
-        return create_product_image(request.form)    
+        return create_product_image(request.form)  
+    elif action == 'modify_image':
+        return modify_product_image(request.form) 
+    elif action == 'delete_image':
+        return delete_product_image(request.form)            
     elif action == 'modify':
         return modify_product(request.form)
     elif action == 'delete':
@@ -393,6 +422,22 @@ def modify_product(form_data):
 
     return jsonify({'message': 'Product modified successfully'}), 200
 
+# Helper function to modify an existing product
+def modify_product_image(form_data):
+    product_id = form_data.get('id')
+    if not product_id:
+        return jsonify({'message': 'Invalid data. "id" is required for "modify" action.'}), 400
+
+    existing_product = ProductImage.query.get(product_id)
+    if not existing_product:
+        return jsonify({'message': 'Product not found.'}), 404
+
+    existing_product.imageUrl = form_data.get('imageUrl', existing_product.imageUrl)
+
+    db.session.commit()
+
+    return jsonify({'message': 'Product modified successfully'}), 200
+
 def delete_product(form_data):
     product_id = form_data.get('id')
     if not product_id:
@@ -418,5 +463,64 @@ def delete_product(form_data):
     db.session.commit()
     return jsonify({'message': 'Product deleted successfully'}), 200
 
+def delete_product_image(form_data):
+    product_id = form_data.get('id')
+    if not product_id:
+        return jsonify({'message': 'Invalid data. "id" is required for "delete" action.'}), 400
+
+    try:
+        product_id = int(product_id)  # 确保 product_id 是整数
+    except ValueError:
+        return jsonify({'message': 'Invalid data. "id" must be an integer.'}), 400
+
+    existing_product = ProductImage.query.get(product_id)
+    if not existing_product:
+        return jsonify({'message': 'Product not found.'}), 404
+
+    # 删除产品
+    db.session.delete(existing_product)
+    db.session.commit()
+    return jsonify({'message': 'Product deleted successfully'}), 200
+
+
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    print('bbbb')
+    print('aaaa'+str(request.files))
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file part'}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+
+    if file:
+        # 获取当前时间戳作为文件名
+        timestamp = int(time.time())
+        filename = f'{timestamp}.png'
+
+        # 保存文件到 images 文件夹
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(file_path)
+
+        # 获取当前 IP 地址（需要安装 `requests` 库）
+        try:
+            # ip_address = requests.get('https://api.ipify.org').text
+            ip_address = '10.42.16.50'
+        except requests.exceptions.RequestException:
+            ip_address = 'unknown'  # 如果获取 IP 失败，则使用 'unknown'
+
+        # 构建绝对路径
+        absolute_path = f'https://{ip_address}:8000/{UPLOAD_FOLDER}/{filename}'  # 假设 Flask 应用运行在端口 5000
+
+        return jsonify({'absolute_path': absolute_path}), 200
+
 if __name__ == '__main__':
-    app.run(host='192.168.2.1', port=8000, debug=True)
+    
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)  # 创建 images 文件夹（如果不存在）
+
+    # Create an SSL context using the CA-issued certificate
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(os.path.join(CERT_FOLDER, CERT_FILE), os.path.join(CERT_FOLDER, KEY_FILE))
+
+    app.run(host='0.0.0.0', port=8000, debug=True, ssl_context=context)
